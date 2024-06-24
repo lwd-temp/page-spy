@@ -9,6 +9,7 @@ export function isBrowser() {
 export function getRandomId() {
   return Math.random().toString(36).slice(2);
 }
+
 export function getObjectKeys<T extends Record<string, any>>(obj: T) {
   return Object.keys(obj) as (keyof T)[];
 }
@@ -118,7 +119,7 @@ export function isClass(obj: unknown): obj is Function {
 
 export function isCN() {
   const langs = navigator.languages;
-  return ['zh-CN', 'zh-HK', 'zh-TW', 'zh'].some((l) => {
+  return ['zh-CN', 'zh-HK', 'zh-TW', 'zh', 'zh-Hans-CN'].some((l) => {
     return langs.includes(l);
   });
 }
@@ -212,10 +213,8 @@ export function getValueType(value: any) {
   return typeof value;
 }
 
-/**
- * The methods are used for internal calls.
- */
-interface PSLog {
+// Usage 1: `psLog.<fn>` to print system level debug info to developer
+interface LogMethods {
   log(...message: any[]): void;
   info(...message: any[]): void;
   warn(...message: any[]): void;
@@ -223,25 +222,64 @@ interface PSLog {
   debug(...message: any[]): void;
 }
 
-const originConsole = { ...console };
+interface PSLog extends LogMethods {
+  // Usage 2: `psLog.unproxy.<fn>` to print debug info for self debugging.
+  unproxy: LogMethods;
+}
 
-// Usage 1: to print system level debug info to developer
-// Usage 2: to print debug info for self debugging. It use origin console,
-// thus can avoid loop call of console.
-export const psLog = (['log', 'info', 'error', 'warn'] as const).reduce(
+const unproxyConsole = { ...console };
+
+export const psLog = (
+  ['log', 'info', 'error', 'warn', 'debug'] as const
+).reduce(
   (result, method) => {
-    // eslint-disable-next-line no-param-reassign
     result[method] = (...message: any[]) => {
-      originConsole[method](
+      console[method](`[PageSpy] [${method.toLocaleUpperCase()}] `, ...message);
+    };
+    result.unproxy[method] = (...message: any[]) => {
+      unproxyConsole[method](
         `[PageSpy] [${method.toLocaleUpperCase()}] `,
         ...message,
       );
     };
     return result;
   },
-  {} as PSLog,
+  { unproxy: {} } as PSLog,
 );
 
 export const removeEndSlash = (s: string) => {
   return s.replace(/\/$/, '');
+};
+
+export function getAuthSecret() {
+  const secret = Math.floor(Math.random() * 1000000);
+  return String(secret).padStart(6, '0');
+}
+export const formatErrorObj = (
+  err: Error | { stack: string; message: string },
+) => {
+  if (typeof err !== 'object') return null;
+  const { name, message, stack } = Object(err);
+  if ([name, message, stack].every(Boolean) === false) {
+    return null;
+  }
+  return {
+    name,
+    message,
+    stack,
+  };
+};
+
+export const blob2base64Async = (blob: Blob) => {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = (e) => {
+      resolve(e.target?.result);
+    };
+    /* c8 ignore next 3 */
+    fr.onerror = () => {
+      reject(new Error('blob2base64Async: can not convert'));
+    };
+    fr.readAsDataURL(blob);
+  });
 };

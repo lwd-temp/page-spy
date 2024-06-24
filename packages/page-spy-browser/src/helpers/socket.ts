@@ -1,14 +1,13 @@
-import { getRandomId, stringifyData } from 'base/src';
-import atom from 'base/src/atom';
+import { stringifyData } from 'base/src';
 import { ROOM_SESSION_KEY } from 'base/src/constants';
-import { makeMessage } from 'base/src/message';
+import { UPDATE_ROOM_INFO } from 'base/src/message/server-type';
 import {
   SocketStoreBase,
   SocketState,
   SocketWrapper,
   WebSocketEvents,
 } from 'base/src/socket-base';
-import { SpyBase } from 'packages/page-spy-types';
+import { InitConfig } from 'page-spy-browser/types';
 
 export class WebSocketWrapper extends SocketWrapper {
   private socketInstance: WebSocket | null = null;
@@ -42,6 +41,31 @@ export class WebSocketStore extends SocketStoreBase {
   // websocket instance
   protected socketWrapper: WebSocketWrapper = new WebSocketWrapper();
 
+  public getPageSpyConfig: (() => Required<InitConfig>) | null = null;
+
+  updateRoomInfo() {
+    if (this.getPageSpyConfig) {
+      const { project, title } = this.getPageSpyConfig();
+      this.send(
+        {
+          type: UPDATE_ROOM_INFO,
+          content: {
+            info: {
+              name: navigator.userAgent,
+              group: project,
+              tags: {
+                title,
+                name: navigator.userAgent,
+                group: project,
+              },
+            },
+          },
+        },
+        true,
+      );
+    }
+  }
+
   public getSocket() {
     return this.socketWrapper;
   }
@@ -50,54 +74,7 @@ export class WebSocketStore extends SocketStoreBase {
   // eslint-disable-next-line class-methods-use-this
   onOffline(): void {
     window.dispatchEvent(new CustomEvent('sdk-inactive'));
-    sessionStorage.setItem(ROOM_SESSION_KEY, JSON.stringify({ usable: false }));
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-useless-constructor
-  constructor() {
-    super();
-    this.addListener('debug', WebSocketStore.handleDebugger);
-  }
-
-  // run executable code which received from remote and send back the result
-  private static handleDebugger(
-    { source }: SpyBase.InteractiveEvent<string>,
-    reply: (data: any) => void,
-  ) {
-    const { type, data } = source;
-    if (type === 'debug') {
-      const originMsg = makeMessage('console', {
-        logType: 'debug-origin',
-        logs: [
-          {
-            id: getRandomId(),
-            type: 'debug-origin',
-            value: data,
-          },
-        ],
-      });
-      reply(originMsg);
-      try {
-        // eslint-disable-next-line no-new-func, @typescript-eslint/no-implied-eval
-        const result = new Function(`return ${data}`)();
-        const evalMsg = makeMessage('console', {
-          logType: 'debug-eval',
-          logs: [atom.transformToAtom(result)],
-        });
-        reply(evalMsg);
-      } catch (err) {
-        const errMsg = makeMessage('console', {
-          logType: 'error',
-          logs: [
-            {
-              type: 'error',
-              value: (err as Error).stack,
-            },
-          ],
-        });
-        reply(errMsg);
-      }
-    }
+    sessionStorage.removeItem(ROOM_SESSION_KEY);
   }
 }
 

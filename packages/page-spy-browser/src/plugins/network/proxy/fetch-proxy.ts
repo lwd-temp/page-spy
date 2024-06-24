@@ -1,4 +1,5 @@
 import {
+  blob2base64Async,
   getRandomId,
   isHeaders,
   isObjectLike,
@@ -6,7 +7,6 @@ import {
   isURL,
   psLog,
 } from 'base/src';
-import { blob2base64Async } from 'page-spy-browser/src/helpers/blob';
 import {
   addContentTypeHeader,
   getFormattedBody,
@@ -77,12 +77,20 @@ export default class FetchProxy extends WebNetworkProxyBase {
           req.withCredentials = true;
         }
 
-        if (isHeaders(requestHeader)) {
-          req.requestHeader = [...requestHeader.entries()];
-        } else if (isObjectLike(requestHeader)) {
-          req.requestHeader = Object.entries(requestHeader);
-        } else {
-          req.requestHeader = requestHeader;
+        if (requestHeader) {
+          if (isHeaders(requestHeader)) {
+            req.requestHeader = [...requestHeader.entries()];
+          } else if (isObjectLike(requestHeader)) {
+            req.requestHeader = Object.entries(requestHeader).map(([k, v]) => [
+              String(k),
+              String(v),
+            ]);
+          } else {
+            req.requestHeader = requestHeader.map(([k, v]) => [
+              String(k),
+              String(v),
+            ]);
+          }
         }
 
         if (req.method !== 'GET') {

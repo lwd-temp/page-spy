@@ -13,6 +13,7 @@ import {
 } from './message';
 import * as SERVER_MESSAGE_TYPE from './message/server-type';
 import atom from './atom';
+import Client from './client';
 
 type InteractiveType = SpyMessage.InteractiveType;
 type InternalMsgType = SpyMessage.InternalMsgType;
@@ -36,13 +37,23 @@ export enum SocketState {
 
 const HEARTBEAT_INTERVAL = 5000;
 
+// The reconnect interval has an initial time of 2000 ms,
+// for each failed reconnection attempt, the time will be increased by 1.5x,
+// until the attempt number reaches 4, the time will be fixed, which is Math.pow(1.5, 4) * 2000.
+// retry interval
+const INIT_RETRY_INTERVAL = 2000;
+// retry interval time will increase by 1.5x each time.
+const RETRY_TIME_INCR = 1.5;
+// the time increase pow limit.
+const MAX_RETRY_INTERVAL = Math.pow(RETRY_TIME_INCR, 4) * INIT_RETRY_INTERVAL;
+
 // 封装不同平台的 socket
 export abstract class SocketWrapper {
   abstract init(url: string): void;
   abstract send(data: string): void;
   abstract close(data?: {}): void;
   abstract getState(): SocketState;
-  protected events: Record<WebSocketEvents, CallbackType[]> = {
+  events: Record<WebSocketEvents, CallbackType[]> = {
     open: [],
     close: [],
     error: [],
@@ -75,7 +86,7 @@ export abstract class SocketWrapper {
     this.events.message.push(fun);
   }
 
-  protected clearListeners() {
+  clearListeners() {
     // clear listeners
     Object.entries(this.events).forEach(([, funs]) => {
       funs.splice(0);
@@ -86,9 +97,13 @@ export abstract class SocketWrapper {
 export abstract class SocketStoreBase {
   protected abstract socketWrapper: SocketWrapper;
 
+  protected abstract updateRoomInfo(): void;
+
   private socketUrl: string = '';
 
   private socketConnection: SpySocket.Connection | null = null;
+
+  private debuggerConnection: SpySocket.Connection | null = null;
 
   // ping timer used for send next ping.
   // a ping is sent after last msg (normal msg or pong) received.
@@ -123,13 +138,10 @@ export abstract class SocketStoreBase {
     'public-data': [],
   };
 
-  // Don't try to reconnect if error occupied
-  private reconnectable: boolean = true;
+  // initial retry interval.
+  private retryInterval = INIT_RETRY_INTERVAL;
 
-  private reconnectTimes = 3;
-
-  // indicated connected  whether or not
-  public connectionStatus: boolean = false;
+  connectable = true;
 
   // response message filters, to handle some wired messages
   public static messageFilters: ((data: any) => any)[] = [];
@@ -143,14 +155,23 @@ export abstract class SocketStoreBase {
   // Simple offline listener
   abstract onOffline(): void;
 
-  public init(url: string) {
+  public async init(url: string) {
     try {
       if (!url) {
         throw Error('WebSocket url cannot be empty');
       }
+      this.socketWrapper.clearListeners();
       // close existing connection
       if (this.socketWrapper.getState() === SocketState.OPEN) {
-        this.socketWrapper.close();
+        // make sure the existing connection closed.
+        // we need to register new handlers immediately.
+        await new Promise<void>((resolve) => {
+          this.socketWrapper.onClose(() => {
+            this.socketWrapper.clearListeners();
+            resolve();
+          });
+          this.socketWrapper.close();
+        });
       }
       this.socketWrapper?.onOpen(() => {
         this.connectOnline();
@@ -199,46 +220,44 @@ export abstract class SocketStoreBase {
   }
 
   public close() {
+    this.connectable = false;
     this.clearPing();
-    this.reconnectTimes = 0;
-    this.reconnectable = false;
     this.socketWrapper?.close();
     this.messages = [];
-    Object.entries(this.events).forEach(([, fns]) => {
+    Object.entries(this.events).forEach(([evt, fns]) => {
+      // 这三个事件的生命周期跟随 socketStore
+      if (['atom-detail', 'atom-getter', 'debugger-online'].includes(evt)) {
+        return;
+      }
       fns.splice(0);
     });
   }
 
   private connectOnline() {
-    this.connectionStatus = true;
-    this.reconnectTimes = 3;
+    this.retryInterval = INIT_RETRY_INTERVAL;
+    this.updateRoomInfo();
     this.ping();
   }
 
   private connectOffline() {
-    this.connectionStatus = false;
     this.socketConnection = null;
+    this.debuggerConnection = null;
     this.clearPing();
-    if (!this.reconnectable || this.reconnectTimes <= 0) {
-      this.onOffline();
-      return;
-    }
 
     if (this.retryTimer) {
       clearTimeout(this.retryTimer);
     }
-
+    if (!this.connectable) return;
     this.retryTimer = setTimeout(() => {
+      if (this.retryInterval < MAX_RETRY_INTERVAL) {
+        this.retryInterval *= RETRY_TIME_INCR;
+      }
       this.retryTimer = null;
       this.tryReconnect();
-    }, 2000);
+    }, this.retryInterval);
   }
 
   tryReconnect() {
-    this.reconnectTimes -= 1;
-    if (this.reconnectTimes <= 0) {
-      this.reconnectable = false;
-    }
     this.init(this.socketUrl);
   }
 
@@ -304,8 +323,23 @@ export abstract class SocketStoreBase {
     const { type } = result;
     switch (type) {
       case CONNECT:
-        const { selfConnection } = result.content;
+        const { selfConnection, roomConnections } = result.content;
         this.socketConnection = selfConnection;
+        this.debuggerConnection =
+          roomConnections.find((i) => i.userId === 'Debugger') || null;
+        break;
+      case JOIN:
+      case LEAVE:
+        const { connection } = result.content;
+        if (connection.userId === 'Debugger') {
+          if (type === JOIN) {
+            this.debuggerConnection = connection;
+            // once connected, send client info
+            this.sendClientInfo();
+          } else {
+            this.debuggerConnection = null;
+          }
+        }
         break;
       case MESSAGE:
         const { data, from, to } = result.content;
@@ -317,20 +351,13 @@ export abstract class SocketStoreBase {
           });
         }
         break;
+      case CLOSE:
       case ERROR:
-        // TODO: we should handle this error
-        // if (result.content.code === 'RoomNotFoundError') {
-        //   // Room not exist, might because used an old connection.
-        // }
-        this.reconnectable = false;
         this.connectOffline();
         break;
       /* c8 ignore start */
       case PONG:
-      case JOIN:
       case PING:
-      case LEAVE:
-      case CLOSE:
       case BROADCAST:
       default:
         // noting
@@ -432,8 +459,9 @@ export abstract class SocketStoreBase {
     }
   }
 
-  private send(msg: SpySocket.ClientEvent, noCache: boolean = false) {
-    if (this.connectionStatus) {
+  protected send(msg: SpySocket.ClientEvent, noCache: boolean = false) {
+    const sendable = this.checkIfSend(msg);
+    if (sendable) {
       /* c8 ignore start */
       try {
         const pkMsg = msg as PackedEvent;
@@ -443,17 +471,12 @@ export abstract class SocketStoreBase {
         this.socketWrapper?.send(dataString);
       } catch (e) {
         psLog.error(`Incompatible: ${(e as Error).message}`);
+        this.connectOffline();
       }
       /* c8 ignore stop */
     }
-    if (!this.isOffline && !noCache) {
-      if (
-        [SERVER_MESSAGE_TYPE.MESSAGE, SERVER_MESSAGE_TYPE.PING].indexOf(
-          msg.type,
-        ) > -1
-      ) {
-        return;
-      }
+    const cacheable = this.checkIfCache(msg, noCache);
+    if (cacheable) {
       if (
         this.messageCapacity !== 0 &&
         this.messages.length >= this.messageCapacity
@@ -462,5 +485,41 @@ export abstract class SocketStoreBase {
       }
       this.messages.push(msg as SpySocket.BroadcastEvent);
     }
+  }
+
+  private checkIfSend(msg: SpySocket.ClientEvent) {
+    if (this.socketWrapper.getState() !== SocketState.OPEN) return false;
+    if (
+      [SERVER_MESSAGE_TYPE.UPDATE_ROOM_INFO, SERVER_MESSAGE_TYPE.PING].includes(
+        msg.type,
+      )
+    ) {
+      return true;
+    }
+
+    if (!this.debuggerConnection) return false;
+    return true;
+  }
+
+  private checkIfCache(msg: SpySocket.ClientEvent, noCache: boolean = false) {
+    if (this.isOffline || noCache) return false;
+    if (
+      [SERVER_MESSAGE_TYPE.MESSAGE, SERVER_MESSAGE_TYPE.PING].includes(msg.type)
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  private sendClientInfo() {
+    const clientInfo = Client.makeClientInfoMsg();
+    this.broadcastMessage(
+      {
+        role: 'client',
+        type: 'client-info',
+        data: clientInfo,
+      },
+      true,
+    );
   }
 }

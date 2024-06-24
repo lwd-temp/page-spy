@@ -26,10 +26,6 @@ export const startUpload = async ({
   debugClient,
   tags = {},
 }: UploadArgs) => {
-  const uploadBtn: HTMLDivElement | null = document.querySelector(
-    '#data-harbor-plugin-upload',
-  );
-
   const data = await harbor.getHarborData();
   const blob = new Blob([JSON.stringify(data)], {
     type: 'application/json',
@@ -40,10 +36,6 @@ export const startUpload = async ({
   const form = new FormData();
   form.append('log', file);
 
-  if (uploadBtn) {
-    uploadBtn.textContent = TIPS.uploading;
-  }
-
   const response = await fetch(
     `${uploadUrl}/api/v1/log/upload?${new URLSearchParams(tags).toString()}`,
     {
@@ -52,12 +44,14 @@ export const startUpload = async ({
     },
   );
   if (!response.ok) {
-    throw new Error('Upload failed');
+    psLog.warn('Upload failed');
+    return null;
   }
 
   const result: H.UploadResult = await response.json();
   if (!result.success) {
-    throw new Error(result.message);
+    psLog.warn(result.message);
+    return null;
   }
   const uploadUrlWithoutSlash = removeEndSlash(uploadUrl);
   const onlineLogUrl = `${uploadUrlWithoutSlash}/api/v1/log/download?fileId=${result.data.fileId}`;
@@ -93,7 +87,7 @@ export const handleUpload = ({
     idleWithUpload = false;
 
     try {
-      uploadBtn.textContent = TIPS.readying;
+      uploadBtn.textContent = TIPS.uploading;
       const debugUrl = await startUpload({
         harbor,
         filename,
@@ -101,6 +95,7 @@ export const handleUpload = ({
         debugClient,
         tags,
       });
+      if (!debugUrl) return;
       // Ready to copy
       const root = document.body || document.documentElement;
       const input = document.createElement('input');

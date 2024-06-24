@@ -19,9 +19,13 @@ export default class NetworkProxyBase {
     return req;
   }
 
+  protected removeRequest(id: string) {
+    delete this.reqMap[id];
+  }
+
   public createRequest(id: string) {
     if (!id) {
-      psLog.error('The "id" is required when init request object');
+      psLog.warn('The "id" is required when init request object');
       return false;
     }
     if (this.reqMap[id]) {
